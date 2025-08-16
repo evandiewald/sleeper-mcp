@@ -1,0 +1,566 @@
+import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+interface Player {
+    first_name?: string;
+    last_name?: string;
+    position?: string;
+    team?: string;
+    status?: string;
+    fantasy_positions?: string[];
+}
+
+interface EnrichedPlayer {
+    player_id: string;
+    name: string;
+    position: string;
+    team: string;
+    status: string;
+    fantasy_positions: string[];
+}
+
+interface Match {
+    m: number;
+    r: number;
+    t1?: number;
+    t2?: number;
+    t1_from?: { w?: number; l?: number };
+    t2_from?: { w?: number; l?: number };
+    w?: number;
+    l?: number;
+    p?: number;
+}
+
+interface CacheData {
+    timestamp: number;
+    players: Record<string, Player>;
+}
+
+class SleeperAPI {
+    private static readonly BASE_URL = "https://api.sleeper.app/v1";
+    private static readonly CACHE_KEY = "sleeper_players_cache";
+    private static readonly CACHE_DURATION_HOURS = 24;
+    
+    private players: Record<string, Player> = {};
+    private playersLoaded = false;
+
+    private async ensurePlayersLoaded(): Promise<void> {
+        if (!this.playersLoaded) {
+            await this.loadPlayersCache();
+            this.playersLoaded = true;
+        }
+    }
+
+    async getUser(usernameOrId: string): Promise<any> {
+        const url = `${SleeperAPI.BASE_URL}/user/${usernameOrId}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getUserLeagues(userId: string, sport: string = "nfl", season: string = "2024"): Promise<any[]> {
+        const url = `${SleeperAPI.BASE_URL}/user/${userId}/leagues/${sport}/${season}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getLeague(leagueId: string): Promise<any> {
+        const url = `${SleeperAPI.BASE_URL}/league/${leagueId}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getLeagueRosters(leagueId: string, enrichPlayers: boolean = true): Promise<any[]> {
+        const url = `${SleeperAPI.BASE_URL}/league/${leagueId}/rosters`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const rosters = await response.json() as any[];
+
+        if (enrichPlayers) {
+            await this.ensurePlayersLoaded();
+            for (const roster of rosters) {
+                if (roster.players && roster.players.length > 0) {
+                    roster.players_enriched = this.enrichPlayerIds(roster.players);
+                }
+                if (roster.starters && roster.starters.length > 0) {
+                    roster.starters_enriched = this.enrichPlayerIds(roster.starters);
+                }
+                if (roster.reserve && roster.reserve.length > 0) {
+                    roster.reserve_enriched = this.enrichPlayerIds(roster.reserve);
+                }
+            }
+        }
+
+        return rosters;
+    }
+
+    async getLeagueUsers(leagueId: string): Promise<any[]> {
+        const url = `${SleeperAPI.BASE_URL}/league/${leagueId}/users`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getMatchups(leagueId: string, week: number): Promise<any[]> {
+        const url = `${SleeperAPI.BASE_URL}/league/${leagueId}/matchups/${week}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getUserDrafts(userId: string, sport: string = "nfl", season: string = "2024"): Promise<any[]> {
+        const url = `${SleeperAPI.BASE_URL}/user/${userId}/drafts/${sport}/${season}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getDraftPicks(draftId: string): Promise<any[]> {
+        const url = `${SleeperAPI.BASE_URL}/draft/${draftId}/picks`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getPlayers(sport: string = "nfl"): Promise<Record<string, Player>> {
+        const url = `${SleeperAPI.BASE_URL}/players/${sport}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getTrendingPlayers(sport: string = "nfl", trendType: string = "add", enrichPlayers: boolean = true): Promise<any[]> {
+        const url = `${SleeperAPI.BASE_URL}/players/${sport}/trending/${trendType}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const trending = await response.json() as any[];
+
+        if (enrichPlayers) {
+            await this.ensurePlayersLoaded();
+            for (const item of trending) {
+                const playerId = item.player_id;
+                if (playerId && this.players[playerId]) {
+                    const player = this.players[playerId];
+                    item.player_info = {
+                        name: `${player.first_name || ''} ${player.last_name || ''}`.trim(),
+                        position: player.position || '',
+                        team: player.team || '',
+                        status: player.status || '',
+                        fantasy_positions: player.fantasy_positions || []
+                    };
+                } else {
+                    item.player_info = {
+                        name: "Unknown Player",
+                        position: "",
+                        team: "",
+                        status: "Unknown",
+                        fantasy_positions: []
+                    };
+                }
+            }
+        }
+
+        return trending;
+    }
+
+    async getWinnersBracket(leagueId: string): Promise<Match[]> {
+        const url = `${SleeperAPI.BASE_URL}/league/${leagueId}/winners_bracket`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getLosersBracket(leagueId: string): Promise<Match[]> {
+        const url = `${SleeperAPI.BASE_URL}/league/${leagueId}/losers_bracket`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getPlayoffResults(leagueId: string): Promise<string> {
+        const [winnersBracket, losersBracket, leagueUsers] = await Promise.all([
+            this.getWinnersBracket(leagueId),
+            this.getLosersBracket(leagueId),
+            this.getLeagueUsers(leagueId)
+        ]);
+
+        const userMap: Record<string, string> = {};
+        for (const user of leagueUsers) {
+            userMap[user.user_id] = user.display_name || user.username || 'Unknown';
+        }
+
+        const rosters = await this.getLeagueRosters(leagueId, false);
+        const rosterToUser: Record<number, string> = {};
+        for (const roster of rosters) {
+            rosterToUser[roster.roster_id] = userMap[roster.owner_id] || 'Unknown';
+        }
+
+        const result: string[] = [];
+
+        if (winnersBracket && winnersBracket.length > 0) {
+            result.push("🏆 WINNERS BRACKET");
+            result.push("=".repeat(50));
+            result.push(...this.formatBracket(winnersBracket, rosterToUser));
+            result.push("");
+        }
+
+        if (losersBracket && losersBracket.length > 0) {
+            result.push("🥉 LOSERS BRACKET");
+            result.push("=".repeat(50));
+            result.push(...this.formatBracket(losersBracket, rosterToUser));
+            result.push("");
+        }
+
+        const finalStandings = this.generateFinalStandings(winnersBracket, losersBracket, rosterToUser);
+        if (finalStandings && finalStandings.length > 0) {
+            result.push("🏅 FINAL STANDINGS");
+            result.push("=".repeat(50));
+            result.push(...finalStandings);
+        }
+
+        return result.join("\n");
+    }
+
+    private formatBracket(bracket: Match[], rosterToUser: Record<number, string>): string[] {
+        if (!bracket || bracket.length === 0) {
+            return ["No bracket data available"];
+        }
+
+        const result: string[] = [];
+        const rounds: Record<number, Match[]> = {};
+
+        for (const match of bracket) {
+            const roundNum = match.r;
+            if (!rounds[roundNum]) {
+                rounds[roundNum] = [];
+            }
+            rounds[roundNum].push(match);
+        }
+
+        for (const roundNum of Object.keys(rounds).map(Number).sort()) {
+            result.push(`\nROUND ${roundNum}:`);
+            result.push("-".repeat(20));
+
+            const sortedMatches = rounds[roundNum].sort((a, b) => a.m - b.m);
+            for (const match of sortedMatches) {
+                const matchLine = this.formatMatch(match, rosterToUser);
+                result.push(matchLine);
+            }
+        }
+
+        return result;
+    }
+
+    private formatMatch(match: Match, rosterToUser: Record<number, string>): string {
+        const matchId = match.m;
+
+        const t1Name = this.getTeamName(match.t1, match.t1_from, rosterToUser);
+        const t2Name = this.getTeamName(match.t2, match.t2_from, rosterToUser);
+
+        let status: string;
+        if (match.w !== undefined) {
+            const winner = rosterToUser[match.w] || `Roster ${match.w}`;
+            const loser = rosterToUser[match.l!] || `Roster ${match.l}`;
+            status = `✅ ${winner} defeats ${loser}`;
+        } else {
+            status = "⏳ Pending";
+        }
+
+        const positionText = match.p ? ` (Position ${match.p})` : "";
+
+        return `  Match ${matchId}: ${t1Name} vs ${t2Name} - ${status}${positionText}`;
+    }
+
+    private getTeamName(teamId?: number, teamFrom?: { w?: number; l?: number }, rosterToUser?: Record<number, string>): string {
+        if (teamId !== undefined && rosterToUser) {
+            return rosterToUser[teamId] || `Roster ${teamId}`;
+        } else if (teamFrom) {
+            if (teamFrom.w !== undefined) {
+                return `Winner of Match ${teamFrom.w}`;
+            } else if (teamFrom.l !== undefined) {
+                return `Loser of Match ${teamFrom.l}`;
+            }
+        }
+        return "TBD";
+    }
+
+    private generateFinalStandings(winnersBracket: Match[], losersBracket: Match[], rosterToUser: Record<number, string>): string[] | null {
+        const allMatches = [...winnersBracket, ...losersBracket];
+
+        if (!allMatches.every(match => match.w !== undefined)) {
+            return null;
+        }
+
+        const standings: Record<number, string> = {};
+
+        const winnersFinal = winnersBracket.reduce((max, match) => match.r > max.r ? match : max, winnersBracket[0]);
+        if (winnersFinal && winnersFinal.w !== undefined) {
+            standings[1] = rosterToUser[winnersFinal.w] || `Roster ${winnersFinal.w}`;
+            standings[2] = rosterToUser[winnersFinal.l!] || `Roster ${winnersFinal.l}`;
+        }
+
+        for (const match of losersBracket) {
+            if (match.p && match.w !== undefined && match.l !== undefined) {
+                const position = match.p;
+                const winner = rosterToUser[match.w] || `Roster ${match.w}`;
+                const loser = rosterToUser[match.l] || `Roster ${match.l}`;
+
+                if (position === 3) {
+                    standings[3] = winner;
+                    standings[4] = loser;
+                } else if (position === 5) {
+                    standings[5] = winner;
+                    standings[6] = loser;
+                } else if (position === 7) {
+                    standings[7] = winner;
+                    standings[8] = loser;
+                }
+            }
+        }
+
+        if (Object.keys(standings).length < 2) {
+            return null;
+        }
+
+        const result: string[] = [];
+        for (const pos of Object.keys(standings).map(Number).sort()) {
+            if (pos === 1) {
+                result.push(`🥇 1st Place: ${standings[pos]}`);
+            } else if (pos === 2) {
+                result.push(`🥈 2nd Place: ${standings[pos]}`);
+            } else if (pos === 3) {
+                result.push(`🥉 3rd Place: ${standings[pos]}`);
+            } else {
+                result.push(`   ${pos}th Place: ${standings[pos]}`);
+            }
+        }
+
+        return result;
+    }
+
+    private async loadPlayersCache(): Promise<void> {
+        const cacheData = await this.getCacheData();
+        if (cacheData && this.isCacheValid(cacheData)) {
+            this.players = cacheData.players;
+        } else {
+            await this.refreshPlayersCache();
+        }
+    }
+
+    private async getCacheData(): Promise<CacheData | null> {
+        // In Cloudflare environment, we would use KV or Durable Objects
+        // For now, we'll just fetch fresh data each time
+        return null;
+    }
+
+    private isCacheValid(cacheData: CacheData): boolean {
+        const cacheAge = Date.now() / 1000 - cacheData.timestamp;
+        return cacheAge < (SleeperAPI.CACHE_DURATION_HOURS * 3600);
+    }
+
+    private async refreshPlayersCache(): Promise<void> {
+        const playersData = await this.getPlayers();
+        this.players = playersData;
+
+        // In a Cloudflare environment, you would save this to KV storage
+        // await env.SLEEPER_CACHE.put(SleeperAPI.CACHE_KEY, JSON.stringify({
+        //     timestamp: Date.now() / 1000,
+        //     players: playersData
+        // }));
+    }
+
+    private enrichPlayerIds(playerIds: string[]): EnrichedPlayer[] {
+        const enrichedPlayers: EnrichedPlayer[] = [];
+        for (const playerId of playerIds) {
+            if (this.players[playerId]) {
+                const player = this.players[playerId];
+                enrichedPlayers.push({
+                    player_id: playerId,
+                    name: `${player.first_name || ''} ${player.last_name || ''}`.trim(),
+                    position: player.position || '',
+                    team: player.team || '',
+                    status: player.status || '',
+                    fantasy_positions: player.fantasy_positions || []
+                });
+            } else {
+                enrichedPlayers.push({
+                    player_id: playerId,
+                    name: "Unknown Player",
+                    position: "",
+                    team: "",
+                    status: "Unknown",
+                    fantasy_positions: []
+                });
+            }
+        }
+        return enrichedPlayers;
+    }
+}
+
+export class SleeperMCP extends McpAgent {
+    server = new McpServer({
+        name: "Sleeper API",
+        version: "1.0.0",
+    });
+
+    private sleeperApi = new SleeperAPI();
+
+    async init() {
+        this.server.tool(
+            "get_user", 
+            { username_or_id: z.string() }, 
+            async ({ username_or_id }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getUser(username_or_id), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_user_leagues",
+            { 
+                user_id: z.string(),
+                sport: z.string().default("nfl"),
+                season: z.string().default("2024")
+            },
+            async ({ user_id, sport, season }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getUserLeagues(user_id, sport, season), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_league",
+            { league_id: z.string() },
+            async ({ league_id }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getLeague(league_id), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_league_rosters",
+            { 
+                league_id: z.string(),
+                enrich_players: z.boolean().default(true)
+            },
+            async ({ league_id, enrich_players }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getLeagueRosters(league_id, enrich_players), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_league_users",
+            { league_id: z.string() },
+            async ({ league_id }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getLeagueUsers(league_id), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_matchups",
+            { 
+                league_id: z.string(),
+                week: z.number()
+            },
+            async ({ league_id, week }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getMatchups(league_id, week), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_user_drafts",
+            {
+                user_id: z.string(),
+                sport: z.string().default("nfl"),
+                season: z.string().default("2024")
+            },
+            async ({ user_id, sport, season }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getUserDrafts(user_id, sport, season), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_draft_picks",
+            { draft_id: z.string() },
+            async ({ draft_id }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getDraftPicks(draft_id), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_trending_players",
+            {
+                sport: z.string().default("nfl"),
+                trend_type: z.string().default("add"),
+                enrich_players: z.boolean().default(true)
+            },
+            async ({ sport, trend_type, enrich_players }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getTrendingPlayers(sport, trend_type, enrich_players), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_playoff_results",
+            { league_id: z.string() },
+            async ({ league_id }) => ({
+                content: [{ type: "text", text: await this.sleeperApi.getPlayoffResults(league_id) }],
+            })
+        );
+
+        this.server.tool(
+            "get_winners_bracket",
+            { league_id: z.string() },
+            async ({ league_id }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getWinnersBracket(league_id), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_losers_bracket",
+            { league_id: z.string() },
+            async ({ league_id }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getLosersBracket(league_id), null, 2) }],
+            })
+        );
+    }
+}
+
+export default {
+    fetch(request: Request, env: Env, ctx: ExecutionContext) {
+        const url = new URL(request.url);
+
+        if (url.pathname === "/sse" || url.pathname === "/sse/message") {
+            return SleeperMCP.serveSSE("/sse").fetch(request, env, ctx);
+        }
+
+        if (url.pathname === "/mcp") {
+            return SleeperMCP.serve("/mcp").fetch(request, env, ctx);
+        }
+
+        return new Response("Not found", { status: 404 });
+    },
+};
