@@ -1,6 +1,7 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import Fuse from "fuse.js";
 
 interface Player {
     first_name?: string;
@@ -9,6 +10,13 @@ interface Player {
     team?: string;
     status?: string;
     fantasy_positions?: string[];
+}
+
+interface PlayerSearchItem {
+    id: string;
+    name: string;
+    position: string;
+    team: string;
 }
 
 interface EnrichedPlayer {
@@ -37,13 +45,26 @@ interface CacheData {
     players: Record<string, Player>;
 }
 
+interface NFLState {
+    season: string;
+    season_type: string;
+    week: number;
+    display_week: number;
+    leg: number;
+}
+
 class SleeperAPI {
     private static readonly BASE_URL = "https://api.sleeper.app/v1";
+    private static readonly STATS_URL = "https://api.sleeper.com/";
+    private static readonly GRAPHQL_URL = "https://sleeper.com/graphql";
     private static readonly CACHE_KEY = "sleeper_players_cache";
     private static readonly CACHE_DURATION_HOURS = 24;
     
     private players: Record<string, Player> = {};
     private playersLoaded = false;
+    private nflState: NFLState | null = null;
+    private playerSearchItems: PlayerSearchItem[] = [];
+    private playerFuse: Fuse<PlayerSearchItem> | null = null;
 
     private async ensurePlayersLoaded(): Promise<void> {
         if (!this.playersLoaded) {
@@ -369,6 +390,7 @@ class SleeperAPI {
         const cacheData = await this.getCacheData();
         if (cacheData && this.isCacheValid(cacheData)) {
             this.players = cacheData.players;
+            this.buildPlayerSearchIndex();
         } else {
             await this.refreshPlayersCache();
         }
@@ -388,12 +410,258 @@ class SleeperAPI {
     private async refreshPlayersCache(): Promise<void> {
         const playersData = await this.getPlayers();
         this.players = playersData;
+        this.buildPlayerSearchIndex();
 
         // In a Cloudflare environment, you would save this to KV storage
         // await env.SLEEPER_CACHE.put(SleeperAPI.CACHE_KEY, JSON.stringify({
         //     timestamp: Date.now() / 1000,
         //     players: playersData
         // }));
+    }
+
+    private buildPlayerSearchIndex(): void {
+        this.playerSearchItems = [];
+        
+        for (const [playerId, player] of Object.entries(this.players)) {
+            const name = `${player.first_name || ''} ${player.last_name || ''}`.trim();
+            if (name) {
+                this.playerSearchItems.push({
+                    id: playerId,
+                    name,
+                    position: player.position || '',
+                    team: player.team || ''
+                });
+            }
+        }
+
+        const fuseOptions = {
+            keys: [
+                { name: 'name', weight: 0.8 },
+                { name: 'position', weight: 0.1 },
+                { name: 'team', weight: 0.1 }
+            ],
+            threshold: 0.3,
+            includeScore: true
+        };
+
+        this.playerFuse = new Fuse(this.playerSearchItems, fuseOptions);
+    }
+
+    async getPlayerIdByName(playerName: string): Promise<{ playerId: string; matchedName: string; score?: number } | null> {
+        await this.ensurePlayersLoaded();
+        
+        if (!this.playerFuse) {
+            this.buildPlayerSearchIndex();
+        }
+
+        const results = this.playerFuse!.search(playerName, { limit: 1 });
+        
+        if (results.length > 0) {
+            const match = results[0];
+            return {
+                playerId: match.item.id,
+                matchedName: match.item.name,
+                score: match.score
+            };
+        }
+
+        return null;
+    }
+
+    async resolvePlayerInput(playerInput: string): Promise<string> {
+        // If it looks like a player ID (all digits), return as-is
+        if (/^\d+$/.test(playerInput)) {
+            return playerInput;
+        }
+
+        // Otherwise, try fuzzy search
+        const result = await this.getPlayerIdByName(playerInput);
+        if (result) {
+            return result.playerId;
+        }
+
+        throw new Error(`Player not found: ${playerInput}`);
+    }
+
+    async getNflState(): Promise<NFLState> {
+        if (!this.nflState) {
+            const url = `${SleeperAPI.BASE_URL}/state/nfl`;
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            this.nflState = await response.json() as NFLState;
+        }
+        return this.nflState;
+    }
+
+    async graphqlRequest(operationName: string, query: string, variables?: any): Promise<any> {
+        const response = await fetch(SleeperAPI.GRAPHQL_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                operationName,
+                variables: variables || {},
+                query
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error(`GraphQL HTTP error! status: ${response.status}`);
+        }
+        
+        return response.json();
+    }
+
+    async getPlayerStats(playerId: string, season?: string, groupByWeek: boolean = false): Promise<any> {
+        const nflState = await this.getNflState();
+        const targetSeason = season || nflState.season;
+        const groupQuery = groupByWeek ? "&grouping=week" : "";
+        const url = `${SleeperAPI.STATS_URL}stats/nfl/player/${playerId}?season_type=regular&season=${targetSeason}${groupQuery}`;
+        
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getPlayerProjections(playerId: string, season?: string): Promise<any> {
+        const nflState = await this.getNflState();
+        const targetSeason = season || nflState.season;
+        const url = `${SleeperAPI.STATS_URL}projections/nfl/player/${playerId}?season_type=regular&season=${targetSeason}&grouping=week`;
+        
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getPlayerNews(playerId: string, limit: number = 2): Promise<any[]> {
+        const query = `query get_player_news_for_ids {
+            news: get_player_news(sport: "nfl", player_id: "${playerId}", limit: ${limit}){
+                metadata
+                player_id
+                published
+                source
+                source_key
+                sport
+            }
+        }`;
+        
+        const result = await this.graphqlRequest('get_player_news_for_ids', query);
+        return result.data.news;
+    }
+
+    async getPlayerRanks(season?: string): Promise<Record<string, any>> {
+        const nflState = await this.getNflState();
+        const targetSeason = season || nflState.season;
+        const url = `${SleeperAPI.STATS_URL}stats/nfl/${targetSeason}?season_type=regular&position[]=DEF&position[]=K&position[]=QB&position[]=RB&position[]=TE&position[]=WR&order_by=pts_ppr`;
+        
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json() as any[];
+        
+        const ranks: Record<string, any> = {};
+        for (const player of data) {
+            if (player.player_id && player.stats) {
+                ranks[player.player_id] = {
+                    rank_ppr: player.stats.rank_ppr,
+                    pos_rank_ppr: player.stats.pos_rank_ppr
+                };
+            }
+        }
+        return ranks;
+    }
+
+    async getLeagueStandings(leagueId: string): Promise<any[]> {
+        const query = `query metadata {
+            metadata(type: "league_history", key: "${leagueId}"){
+                key
+                type
+                data
+                last_updated
+                created
+            }    
+        }`;
+        
+        const result = await this.graphqlRequest('metadata', query);
+        const standings = result.data.metadata.data.standings;
+        
+        return standings.sort((a: any, b: any) => {
+            if (b.wins !== a.wins) return b.wins - a.wins;
+            return b.fpts - a.fpts;
+        });
+    }
+
+    async getAllWeeklyProjections(season?: string, week?: number): Promise<any[]> {
+        const nflState = await this.getNflState();
+        const targetSeason = season || nflState.season;
+        const targetWeek = week || nflState.display_week;
+        const url = `${SleeperAPI.STATS_URL}projections/nfl/${targetSeason}/${targetWeek}?season_type=regular&position[]=DEF&position[]=K&position[]=QB&position[]=RB&position[]=TE&position[]=WR&order_by=pts_ppr`;
+        
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    }
+
+    async getEnrichedPlayers(season?: string, limit: number = 800): Promise<Record<string, any>> {
+        const nflState = await this.getNflState();
+        const targetSeason = season || nflState.season;
+        
+        const [projections, ranks] = await Promise.all([
+            this.getAllWeeklyProjections(targetSeason),
+            this.getPlayerRanks(targetSeason)
+        ]);
+        
+        const result: Record<string, any> = {};
+        const limitedProjections = limit ? projections.slice(0, limit) : projections;
+        
+        for (const projection of limitedProjections) {
+            const playerId = projection.player_id;
+            if (playerId && projection.player) {
+                result[playerId] = {
+                    ...projection.player,
+                    ...(ranks[playerId] || {})
+                };
+            }
+        }
+        
+        return result;
+    }
+
+    // Player name-friendly wrapper methods
+    async getPlayerStatsByName(playerNameOrId: string, season?: string, groupByWeek: boolean = false): Promise<any> {
+        const playerId = await this.resolvePlayerInput(playerNameOrId);
+        return this.getPlayerStats(playerId, season, groupByWeek);
+    }
+
+    async getPlayerProjectionsByName(playerNameOrId: string, season?: string): Promise<any> {
+        const playerId = await this.resolvePlayerInput(playerNameOrId);
+        return this.getPlayerProjections(playerId, season);
+    }
+
+    async getPlayerNewsByName(playerNameOrId: string, limit: number = 2): Promise<any[]> {
+        const playerId = await this.resolvePlayerInput(playerNameOrId);
+        return this.getPlayerNews(playerId, limit);
+    }
+
+    async searchPlayers(query: string, limit: number = 10): Promise<PlayerSearchItem[]> {
+        await this.ensurePlayersLoaded();
+        
+        if (!this.playerFuse) {
+            this.buildPlayerSearchIndex();
+        }
+
+        const results = this.playerFuse!.search(query, { limit });
+        return results.map(result => result.item);
     }
 
     private enrichPlayerIds(playerIds: string[]): EnrichedPlayer[] {
@@ -545,6 +813,129 @@ export class SleeperMCP extends McpAgent {
             async ({ league_id }) => ({
                 content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getLosersBracket(league_id), null, 2) }],
             })
+        );
+
+        this.server.tool(
+            "get_nfl_state",
+            {},
+            async () => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getNflState(), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_player_stats",
+            {
+                player: z.string().describe("Player ID or player name (e.g., 'Josh Allen' or '4881')"),
+                season: z.string().optional(),
+                group_by_week: z.boolean().default(false)
+            },
+            async ({ player, season, group_by_week }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getPlayerStatsByName(player, season, group_by_week), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_player_projections",
+            {
+                player: z.string().describe("Player ID or player name (e.g., 'Josh Allen' or '4881')"),
+                season: z.string().optional()
+            },
+            async ({ player, season }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getPlayerProjectionsByName(player, season), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_player_news",
+            {
+                player: z.string().describe("Player ID or player name (e.g., 'Josh Allen' or '4881')"),
+                limit: z.number().default(2)
+            },
+            async ({ player, limit }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getPlayerNewsByName(player, limit), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_player_ranks",
+            {
+                season: z.string().optional()
+            },
+            async ({ season }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getPlayerRanks(season), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_league_standings",
+            {
+                league_id: z.string()
+            },
+            async ({ league_id }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getLeagueStandings(league_id), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_weekly_projections",
+            {
+                season: z.string().optional(),
+                week: z.number().optional()
+            },
+            async ({ season, week }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getAllWeeklyProjections(season, week), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "get_enriched_players",
+            {
+                season: z.string().optional(),
+                limit: z.number().default(800)
+            },
+            async ({ season, limit }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getEnrichedPlayers(season, limit), null, 2) }],
+            })
+        );
+
+        // Player search and utility tools
+
+        this.server.tool(
+            "search_players",
+            {
+                query: z.string(),
+                limit: z.number().default(10)
+            },
+            async ({ query, limit }) => ({
+                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.searchPlayers(query, limit), null, 2) }],
+            })
+        );
+
+        this.server.tool(
+            "find_player_id",
+            {
+                player_name: z.string()
+            },
+            async ({ player_name }) => {
+                const result = await this.sleeperApi.getPlayerIdByName(player_name);
+                if (result) {
+                    return {
+                        content: [{ 
+                            type: "text", 
+                            text: JSON.stringify({
+                                player_id: result.playerId,
+                                matched_name: result.matchedName,
+                                confidence_score: result.score
+                            }, null, 2) 
+                        }],
+                    };
+                } else {
+                    return {
+                        content: [{ type: "text", text: `Player not found: ${player_name}` }],
+                    };
+                }
+            }
         );
     }
 }
