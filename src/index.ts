@@ -643,9 +643,18 @@ class SleeperAPI {
         return this.getPlayerStats(playerId, season, groupByWeek);
     }
 
-    async getPlayerProjectionsByName(playerNameOrId: string, season?: string): Promise<any> {
+    async getPlayerProjectionsByName(playerNameOrId: string, season?: string, formatted: boolean = true): Promise<any> {
         const playerId = await this.resolvePlayerInput(playerNameOrId);
-        return this.getPlayerProjections(playerId, season);
+        const projections = await this.getPlayerProjections(playerId, season);
+        
+        if (formatted) {
+            return {
+                formatted_table: this.formatProjectionsTable(projections),
+                raw_data: projections
+            };
+        }
+        
+        return projections;
     }
 
     async getPlayerNewsByName(playerNameOrId: string, limit: number = 2): Promise<any[]> {
@@ -662,6 +671,81 @@ class SleeperAPI {
 
         const results = this.playerFuse!.search(query, { limit });
         return results.map(result => result.item);
+    }
+
+    private formatProjectionsTable(projections: any): string {
+        if (!projections || typeof projections !== 'object') {
+            return "No projections data available";
+        }
+
+        const weeks = Object.keys(projections)
+            .filter(key => projections[key] !== null)
+            .sort((a, b) => parseInt(a) - parseInt(b));
+
+        if (weeks.length === 0) {
+            return "No projection weeks available";
+        }
+
+        // Get first valid week to determine player position/stats available
+        const firstWeek = projections[weeks[0]];
+        const stats = firstWeek.stats || {};
+        const hasPassingStats = stats.pass_yd !== undefined;
+        const hasReceivingStats = stats.rec !== undefined;
+        const hasRushingStats = stats.rush_yd !== undefined;
+
+        // Create position-specific headers
+        let header = "Week | Date       | Opp";
+        let separator = "";
+        
+        if (hasPassingStats) {
+            header += " | Pass Yds | Pass TDs";
+        }
+        if (hasRushingStats) {
+            header += " | Rush Yds | Rush TDs";
+        }
+        if (hasReceivingStats) {
+            header += " | Rec | Rec Yds | Rec TDs";
+        }
+        header += " | PPR Pts";
+        
+        separator = "-".repeat(header.length);
+        
+        const rows = weeks.map(week => {
+            const proj = projections[week];
+            const stats = proj.stats || {};
+            
+            const weekNum = week.toString().padStart(2);
+            const date = proj.date ? new Date(proj.date).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }) : 'TBD';
+            const opponent = proj.opponent || 'TBD';
+            
+            let row = `${weekNum}   | ${date.padEnd(10)} | ${opponent.padEnd(3)}`;
+            
+            if (hasPassingStats) {
+                const passYds = Math.round(stats.pass_yd || 0).toString().padStart(8);
+                const passTds = (stats.pass_td || 0).toFixed(1).padStart(8);
+                row += ` | ${passYds} | ${passTds}`;
+            }
+            
+            if (hasRushingStats) {
+                const rushYds = Math.round(stats.rush_yd || 0).toString().padStart(8);
+                const rushTds = (stats.rush_td || 0).toFixed(1).padStart(8);
+                row += ` | ${rushYds} | ${rushTds}`;
+            }
+            
+            if (hasReceivingStats) {
+                const receptions = (stats.rec || 0).toFixed(1).padStart(3);
+                const recYds = Math.round(stats.rec_yd || 0).toString().padStart(7);
+                const recTds = (stats.rec_td || 0).toFixed(1).padStart(7);
+                row += ` | ${receptions} | ${recYds} | ${recTds}`;
+            }
+            
+            const fantasyPts = (stats.pts_ppr || 0).toFixed(1).padStart(7);
+            row += ` | ${fantasyPts}`;
+            
+            return row;
+        });
+
+        return [header, separator, ...rows].join('\n');
     }
 
     private enrichPlayerIds(playerIds: string[]): EnrichedPlayer[] {
@@ -839,11 +923,21 @@ export class SleeperMCP extends McpAgent {
             "get_player_projections",
             {
                 player: z.string().describe("Player ID or player name (e.g., 'Josh Allen' or '4881')"),
-                season: z.string().optional()
+                season: z.string().optional(),
+                formatted: z.boolean().default(true).describe("Return formatted table (true) or raw data (false)")
             },
-            async ({ player, season }) => ({
-                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getPlayerProjectionsByName(player, season), null, 2) }],
-            })
+            async ({ player, season, formatted }) => {
+                const result = await this.sleeperApi.getPlayerProjectionsByName(player, season, formatted);
+                if (formatted && result.formatted_table) {
+                    return {
+                        content: [{ type: "text", text: result.formatted_table }],
+                    };
+                } else {
+                    return {
+                        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+                    };
+                }
+            }
         );
 
         this.server.tool(
