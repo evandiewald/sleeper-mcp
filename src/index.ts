@@ -135,13 +135,25 @@ class SleeperAPI {
         return response.json();
     }
 
-    async getMatchups(leagueId: string, week: number): Promise<any[]> {
+    async getMatchups(leagueId: string, week: number, formatted: boolean = true): Promise<any[] | string> {
         const url = `${SleeperAPI.BASE_URL}/league/${leagueId}/matchups/${week}`;
         const response = await fetch(url);
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
-        return response.json();
+        const matchups = await response.json() as any[];
+        
+        if (formatted) {
+            await this.ensurePlayersLoaded();
+            const [users, rosters] = await Promise.all([
+                this.getLeagueUsers(leagueId),
+                this.getLeagueRosters(leagueId, false)
+            ]);
+            
+            return this.formatMatchupsTable(matchups as any[], users as any[], rosters as any[], week);
+        }
+        
+        return matchups;
     }
 
     async getUserDrafts(userId: string, sport: string = "nfl", season: string = "2024"): Promise<any[]> {
@@ -698,6 +710,99 @@ class SleeperAPI {
         return results.map(result => result.item);
     }
 
+    private formatMatchupsTable(matchups: any[], users: any[], rosters: any[], week: number): string {
+        if (!matchups || matchups.length === 0) {
+            return "No matchup data available";
+        }
+
+        // Create mapping from roster_id to user display name
+        const userMap: Record<string, string> = {};
+        for (const user of users) {
+            userMap[user.user_id] = user.display_name || user.username || 'Unknown';
+        }
+        
+        const rosterToUser: Record<number, string> = {};
+        for (const roster of rosters) {
+            rosterToUser[roster.roster_id] = userMap[roster.owner_id] || 'Unknown';
+        }
+
+        // Group matchups by matchup_id
+        const matchupGroups: Record<number, any[]> = {};
+        for (const matchup of matchups) {
+            if (!matchupGroups[matchup.matchup_id]) {
+                matchupGroups[matchup.matchup_id] = [];
+            }
+            matchupGroups[matchup.matchup_id].push(matchup);
+        }
+
+        const result: string[] = [];
+        result.push(`WEEK ${week} MATCHUPS`);
+        result.push("=".repeat(80));
+        result.push("");
+
+        for (const matchupId of Object.keys(matchupGroups).sort()) {
+            const teams = matchupGroups[parseInt(matchupId)];
+            if (teams.length === 2) {
+                const [team1, team2] = teams.sort((a, b) => b.points - a.points); // Higher score first
+                const winner = team1.points > team2.points ? team1 : (team2.points > team1.points ? team2 : null);
+                
+                result.push(`MATCHUP ${matchupId}`);
+                result.push("-".repeat(40));
+                
+                // Team 1
+                const team1Name = rosterToUser[team1.roster_id] || 'Unknown';
+                const team1Score = team1.points.toFixed(2);
+                const winnerIndicator1 = winner && winner.roster_id === team1.roster_id ? " 🏆" : "";
+                result.push(`${team1Name}: ${team1Score}${winnerIndicator1}`);
+                
+                // Team 1 starters
+                const team1Starters = this.formatStarters(team1.starters, team1.starters_points);
+                result.push(team1Starters);
+                result.push("");
+                
+                // Team 2
+                const team2Name = rosterToUser[team2.roster_id] || 'Unknown';
+                const team2Score = team2.points.toFixed(2);
+                const winnerIndicator2 = winner && winner.roster_id === team2.roster_id ? " 🏆" : "";
+                result.push(`${team2Name}: ${team2Score}${winnerIndicator2}`);
+                
+                // Team 2 starters
+                const team2Starters = this.formatStarters(team2.starters, team2.starters_points);
+                result.push(team2Starters);
+                result.push("");
+            }
+        }
+
+        return result.join('\n');
+    }
+
+    private formatStarters(starters: string[], starterPoints: number[]): string {
+        const lines: string[] = [];
+        
+        for (let i = 0; i < starters.length; i++) {
+            const playerId = starters[i];
+            const points = starterPoints[i]?.toFixed(1) || '0.0';
+            
+            let playerInfo = 'Unknown Player';
+            if (playerId === '0') {
+                playerInfo = 'Empty Slot';
+            } else if (playerId.length <= 3 && /^[A-Z]+$/.test(playerId)) {
+                // Defense (e.g., "BAL", "KC")
+                playerInfo = `${playerId} DST`;
+            } else if (this.players[playerId]) {
+                const player = this.players[playerId];
+                const name = `${player.first_name || ''} ${player.last_name || ''}`.trim();
+                const position = player.position || 'N/A';
+                const team = player.team || 'N/A';
+                playerInfo = `${name} (${position}, ${team})`;
+            }
+            
+            lines.push(`  ${playerInfo.padEnd(35)} ${points.padStart(6)} pts`);
+        }
+        
+        return lines.join('\n');
+    }
+
     private formatDraftPicksTable(picks: any[], users: any[], rosters: any[]): string {
         if (!picks || picks.length === 0) {
             return "No draft picks data available";
@@ -935,14 +1040,24 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_matchups",
-            "Get matchup results and scores for a specific week.",
+            "Get matchup results and scores for a specific week with formatted display.",
             { 
                 league_id: z.string(),
-                week: z.number()
+                week: z.number(),
+                formatted: z.boolean().default(true).describe("Return formatted matchup display (true) or raw data (false)")
             },
-            async ({ league_id, week }) => ({
-                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getMatchups(league_id, week), null, 2) }],
-            })
+            async ({ league_id, week, formatted }) => {
+                const result = await this.sleeperApi.getMatchups(league_id, week, formatted);
+                if (formatted && typeof result === 'string') {
+                    return {
+                        content: [{ type: "text", text: result }],
+                    };
+                } else {
+                    return {
+                        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+                    };
+                }
+            }
         );
 
         this.server.tool(
