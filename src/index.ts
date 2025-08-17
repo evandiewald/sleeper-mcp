@@ -786,7 +786,8 @@ export class SleeperMCP extends McpAgent {
 
     async init() {
         this.server.tool(
-            "get_user", 
+            "get_user",
+            "Get user information by username or user ID.",
             { username_or_id: z.string() }, 
             async ({ username_or_id }) => ({
                 content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getUser(username_or_id), null, 2) }],
@@ -795,6 +796,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_user_leagues",
+            "Get all leagues for a user in a specific sport and season.",
             { 
                 user_id: z.string(),
                 sport: z.string().default("nfl"),
@@ -807,6 +809,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_league",
+            "Get league information and settings.",
             { league_id: z.string() },
             async ({ league_id }) => ({
                 content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getLeague(league_id), null, 2) }],
@@ -815,6 +818,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_league_rosters",
+            "Get all team rosters in a league with optional player enrichment.",
             { 
                 league_id: z.string(),
                 enrich_players: z.boolean().default(true)
@@ -826,6 +830,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_league_users",
+            "Get all users (managers) in a league.",
             { league_id: z.string() },
             async ({ league_id }) => ({
                 content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getLeagueUsers(league_id), null, 2) }],
@@ -834,6 +839,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_matchups",
+            "Get matchup results and scores for a specific week.",
             { 
                 league_id: z.string(),
                 week: z.number()
@@ -845,6 +851,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_user_drafts",
+            "Get all drafts for a user in a specific sport and season.",
             {
                 user_id: z.string(),
                 sport: z.string().default("nfl"),
@@ -857,6 +864,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_draft_picks",
+            "Get all picks from a specific draft.",
             { draft_id: z.string() },
             async ({ draft_id }) => ({
                 content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getDraftPicks(draft_id), null, 2) }],
@@ -865,6 +873,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_trending_players",
+            "Get players that are trending (being added/dropped) across leagues.",
             {
                 sport: z.string().default("nfl"),
                 trend_type: z.string().default("add"),
@@ -877,6 +886,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_playoff_results",
+            "Get the playoff results - use this to determine final standings for a league.",
             { league_id: z.string() },
             async ({ league_id }) => ({
                 content: [{ type: "text", text: await this.sleeperApi.getPlayoffResults(league_id) }],
@@ -884,23 +894,8 @@ export class SleeperMCP extends McpAgent {
         );
 
         this.server.tool(
-            "get_winners_bracket",
-            { league_id: z.string() },
-            async ({ league_id }) => ({
-                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getWinnersBracket(league_id), null, 2) }],
-            })
-        );
-
-        this.server.tool(
-            "get_losers_bracket",
-            { league_id: z.string() },
-            async ({ league_id }) => ({
-                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getLosersBracket(league_id), null, 2) }],
-            })
-        );
-
-        this.server.tool(
             "get_nfl_state",
+            "Get current NFL season state (week, season type, etc.).",
             {},
             async () => ({
                 content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getNflState(), null, 2) }],
@@ -909,6 +904,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_player_stats",
+            "Get player statistics for a season, optionally grouped by week.",
             {
                 player: z.string().describe("Player ID or player name (e.g., 'Josh Allen' or '4881')"),
                 season: z.string().optional(),
@@ -921,6 +917,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_player_projections",
+            "Get player projections with formatted table display.",
             {
                 player: z.string().describe("Player ID or player name (e.g., 'Josh Allen' or '4881')"),
                 season: z.string().optional(),
@@ -942,6 +939,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_player_news",
+            "Get recent news articles for a player.",
             {
                 player: z.string().describe("Player ID or player name (e.g., 'Josh Allen' or '4881')"),
                 limit: z.number().default(2)
@@ -953,6 +951,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_player_ranks",
+            "Get player rankings by PPR points for a season.",
             {
                 season: z.string().optional()
             },
@@ -962,7 +961,8 @@ export class SleeperMCP extends McpAgent {
         );
 
         this.server.tool(
-            "get_league_standings",
+            "get_regular_season_standings",
+            "Returns the latest *regular season* standings for a league. For final standings in a historical season, make sure to check the playoff results as well.",
             {
                 league_id: z.string()
             },
@@ -973,6 +973,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_weekly_projections",
+            "Get all player projections for a specific week.",
             {
                 season: z.string().optional(),
                 week: z.number().optional()
@@ -982,21 +983,11 @@ export class SleeperMCP extends McpAgent {
             })
         );
 
-        this.server.tool(
-            "get_enriched_players",
-            {
-                season: z.string().optional(),
-                limit: z.number().default(800)
-            },
-            async ({ season, limit }) => ({
-                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getEnrichedPlayers(season, limit), null, 2) }],
-            })
-        );
-
         // Player search and utility tools
 
         this.server.tool(
             "search_players",
+            "Search for players by name with fuzzy matching.",
             {
                 query: z.string(),
                 limit: z.number().default(10)
@@ -1008,6 +999,7 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "find_player_id",
+            "Find a player's ID by name with confidence scoring.",
             {
                 player_name: z.string()
             },
