@@ -153,13 +153,32 @@ class SleeperAPI {
         return response.json();
     }
 
-    async getDraftPicks(draftId: string): Promise<any[]> {
+    async getDraftPicks(draftId: string, formatted: boolean = true): Promise<any[] | string> {
         const url = `${SleeperAPI.BASE_URL}/draft/${draftId}/picks`;
         const response = await fetch(url);
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
-        return response.json();
+        const picks = await response.json();
+        
+        if (formatted) {
+            // Get league users to map roster_id to team names
+            const draftResponse = await fetch(`${SleeperAPI.BASE_URL}/draft/${draftId}`);
+            if (!draftResponse.ok) {
+                throw new Error(`HTTP error getting draft info! status: ${draftResponse.status}`);
+            }
+            const draft = await draftResponse.json() as any;
+            const leagueId = draft.league_id;
+            
+            const [users, rosters] = await Promise.all([
+                this.getLeagueUsers(leagueId),
+                this.getLeagueRosters(leagueId, false)
+            ]);
+            
+            return this.formatDraftPicksTable(picks as any[], users as any[], rosters as any[]);
+        }
+        
+        return picks;
     }
 
     async getPlayers(sport: string = "nfl"): Promise<Record<string, Player>> {
@@ -679,6 +698,44 @@ class SleeperAPI {
         return results.map(result => result.item);
     }
 
+    private formatDraftPicksTable(picks: any[], users: any[], rosters: any[]): string {
+        if (!picks || picks.length === 0) {
+            return "No draft picks data available";
+        }
+
+        // Create mapping from roster_id to user display name
+        const userMap: Record<string, string> = {};
+        for (const user of users) {
+            userMap[user.user_id] = user.display_name || user.username || 'Unknown';
+        }
+        
+        const rosterToUser: Record<number, string> = {};
+        for (const roster of rosters) {
+            rosterToUser[roster.roster_id] = userMap[roster.owner_id] || 'Unknown';
+        }
+
+        const header = "Round | Pick | Player Name                | Pos | NFL Team | Drafted By Team";
+        const separator = "-".repeat(header.length);
+        
+        const rows = picks.map(pick => {
+            const round = pick.round.toString().padStart(5);
+            const pickNo = pick.pick_no.toString().padStart(4);
+            
+            const firstName = pick.metadata?.first_name || '';
+            const lastName = pick.metadata?.last_name || '';
+            const playerName = `${firstName} ${lastName}`.trim() || 'Unknown Player';
+            const paddedName = playerName.padEnd(26);
+            
+            const position = (pick.metadata?.position || 'N/A').padEnd(3);
+            const nflTeam = (pick.metadata?.team || 'N/A').padEnd(8);
+            const draftedBy = (rosterToUser[pick.roster_id] || 'Unknown').padEnd(15);
+            
+            return `${round} | ${pickNo} | ${paddedName} | ${position} | ${nflTeam} | ${draftedBy}`;
+        });
+
+        return [header, separator, ...rows].join('\n');
+    }
+
     private formatPlayerRanksTable(data: any[]): string {
         if (!data || data.length === 0) {
             return "No player rankings data available";
@@ -903,11 +960,23 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_draft_picks",
-            "Get all picks from a specific draft.",
-            { draft_id: z.string() },
-            async ({ draft_id }) => ({
-                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getDraftPicks(draft_id), null, 2) }],
-            })
+            "Get all picks from a specific draft with formatted table display.",
+            { 
+                draft_id: z.string(),
+                formatted: z.boolean().default(true).describe("Return formatted table (true) or raw data (false)")
+            },
+            async ({ draft_id, formatted }) => {
+                const result = await this.sleeperApi.getDraftPicks(draft_id, formatted);
+                if (formatted && typeof result === 'string') {
+                    return {
+                        content: [{ type: "text", text: result }],
+                    };
+                } else {
+                    return {
+                        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+                    };
+                }
+            }
         );
 
         this.server.tool(
