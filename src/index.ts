@@ -556,7 +556,7 @@ class SleeperAPI {
         return result.data.news;
     }
 
-    async getPlayerRanks(season?: string): Promise<Record<string, any>> {
+    async getPlayerRanks(season?: string, formatted: boolean = true): Promise<Record<string, any> | string> {
         const nflState = await this.getNflState();
         const targetSeason = season || nflState.season;
         const url = `${SleeperAPI.STATS_URL}stats/nfl/${targetSeason}?season_type=regular&position[]=DEF&position[]=K&position[]=QB&position[]=RB&position[]=TE&position[]=WR&order_by=pts_ppr`;
@@ -566,6 +566,11 @@ class SleeperAPI {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         const data = await response.json() as any[];
+        
+        if (formatted) {
+            await this.ensurePlayersLoaded();
+            return this.formatPlayerRanksTable(data);
+        }
         
         const ranks: Record<string, any> = {};
         for (const player of data) {
@@ -618,18 +623,19 @@ class SleeperAPI {
         
         const [projections, ranks] = await Promise.all([
             this.getAllWeeklyProjections(targetSeason),
-            this.getPlayerRanks(targetSeason)
+            this.getPlayerRanks(targetSeason, false)
         ]);
         
         const result: Record<string, any> = {};
         const limitedProjections = limit ? projections.slice(0, limit) : projections;
+        const ranksData = ranks as Record<string, any>;
         
         for (const projection of limitedProjections) {
             const playerId = projection.player_id;
             if (playerId && projection.player) {
                 result[playerId] = {
                     ...projection.player,
-                    ...(ranks[playerId] || {})
+                    ...(ranksData[playerId] || {})
                 };
             }
         }
@@ -671,6 +677,39 @@ class SleeperAPI {
 
         const results = this.playerFuse!.search(query, { limit });
         return results.map(result => result.item);
+    }
+
+    private formatPlayerRanksTable(data: any[]): string {
+        if (!data || data.length === 0) {
+            return "No player rankings data available";
+        }
+
+        // Sort by overall PPR rank
+        const sortedPlayers = data
+            .filter(player => player.player_id && player.stats && player.stats.rank_ppr)
+            .sort((a, b) => a.stats.rank_ppr - b.stats.rank_ppr)
+            .slice(0, 200); // Limit to top 200 for readability
+
+        const header = "Rank | Pos Rank | Player Name                | Pos | Team | PPR Pts";
+        const separator = "-".repeat(header.length);
+        
+        const rows = sortedPlayers.map(playerData => {
+            const playerId = playerData.player_id;
+            const stats = playerData.stats;
+            const player = this.players[playerId];
+            
+            const rank = stats.rank_ppr.toString().padStart(4);
+            const posRank = stats.pos_rank_ppr.toString().padStart(8);
+            const name = player ? `${player.first_name || ''} ${player.last_name || ''}`.trim() : 'Unknown Player';
+            const paddedName = name.padEnd(26);
+            const position = (player?.position || 'N/A').padEnd(3);
+            const team = (player?.team || 'N/A').padEnd(4);
+            const pprPts = (stats.pts_ppr || 0).toFixed(1).padStart(7);
+            
+            return `${rank} | ${posRank} | ${paddedName} | ${position} | ${team} | ${pprPts}`;
+        });
+
+        return [header, separator, ...rows].join('\n');
     }
 
     private formatProjectionsTable(projections: any): string {
@@ -951,13 +990,23 @@ export class SleeperMCP extends McpAgent {
 
         this.server.tool(
             "get_player_ranks",
-            "Get player rankings by PPR points for a season.",
+            "Get player rankings by PPR points for a season with formatted table.",
             {
-                season: z.string().optional()
+                season: z.string().optional(),
+                formatted: z.boolean().default(true).describe("Return formatted table (true) or raw data (false)")
             },
-            async ({ season }) => ({
-                content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getPlayerRanks(season), null, 2) }],
-            })
+            async ({ season, formatted }) => {
+                const result = await this.sleeperApi.getPlayerRanks(season, formatted);
+                if (formatted && typeof result === 'string') {
+                    return {
+                        content: [{ type: "text", text: result }],
+                    };
+                } else {
+                    return {
+                        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+                    };
+                }
+            }
         );
 
         this.server.tool(
