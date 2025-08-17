@@ -202,7 +202,3 @@ src/
 package.json          # Dependencies and scripts
 tsconfig.json         # TypeScript configuration
 ```
-
-## License
-
-[Add your license information here]
