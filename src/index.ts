@@ -988,7 +988,7 @@ export class SleeperMCP extends McpAgent {
     async init() {
         this.server.tool(
             "get_user",
-            "Get user information by username or user ID.",
+            "Get user information by username or user ID. Ask the user for their username and call this method first before looking up any league details.",
             { username_or_id: z.string() }, 
             async ({ username_or_id }) => ({
                 content: [{ type: "text", text: JSON.stringify(await this.sleeperApi.getUser(username_or_id), null, 2) }],
